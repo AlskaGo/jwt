@@ -5,8 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"strconv"
-	"time"
+	"errors"
+	jsonVerification "github.com/AlskaGo/jwt/json"
+	"github.com/AlskaGo/jwt/time"
+	"strings"
+)
+
+var (
+	RawURLEncoding = base64.URLEncoding.WithPadding(base64.NoPadding)
 )
 
 type JOSEHeader map[string]interface{}
@@ -34,7 +40,7 @@ func (j JOSEHeader) SetValue(headerParameterName string, headerParameterValue in
 }
 
 func NewClaimsSet() ClaimsSet {
-	claimsSet := ClaimsSet{"iat": UnixTimeNowString()}
+	claimsSet := ClaimsSet{"iat": time.UnixTimeNowToString()}
 
 	return claimsSet
 }
@@ -54,7 +60,7 @@ func (c ClaimsSet) SetValue(claimName, claimValue string) {
 	c[claimName] = claimValue
 }
 
-func Sign(joseHeader JOSEHeader, claimsSet ClaimsSet, secret string) (string, error) {
+func MacComputation(joseHeader JOSEHeader, claimsSet ClaimsSet, secret string) (string, error) {
 	header, err := json.Marshal(joseHeader)
 	if err != nil {
 		return "", err
@@ -65,19 +71,69 @@ func Sign(joseHeader JOSEHeader, claimsSet ClaimsSet, secret string) (string, er
 		return "", err
 	}
 
-	RawURLEncoding := base64.URLEncoding.WithPadding(base64.NoPadding)
-	base64EncodedHeader := RawURLEncoding.EncodeToString(header)
-	base64EncodedPayload := RawURLEncoding.EncodeToString(payload)
+	JWTProtectedHeader := RawURLEncoding.EncodeToString(header)
+	JWTPayload := RawURLEncoding.EncodeToString(payload)
 
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(base64EncodedHeader + "." + base64EncodedPayload))
-	base64JWSSignature := RawURLEncoding.EncodeToString(mac.Sum(nil))
+	mac.Write([]byte(JWTProtectedHeader + "." + JWTPayload))
+	JWSSignature := RawURLEncoding.EncodeToString(mac.Sum(nil))
 
-	JWT := base64EncodedHeader + "." + base64EncodedPayload + "." + base64JWSSignature
+	JWT := JWTProtectedHeader + "." + JWTPayload + "." + JWSSignature
 
 	return JWT, nil
 }
 
-func UnixTimeNowString() string {
-	return strconv.FormatInt(time.Now().Unix(), 10)
+func MacValidation(JWT, secret string) (bool, error) {
+	JWTComponents := strings.Split(JWT, ".")
+
+	JWTProtectedHeader := JWTComponents[0]
+	JWTPayload := JWTComponents[1]
+	JWSSignature := JWTComponents[2]
+
+	decodedJWTProtectedHeader, err := RawURLEncoding.DecodeString(JWTProtectedHeader)
+	if err != nil {
+		return false, err
+	}
+
+	header, err := json.Marshal(string(decodedJWTProtectedHeader))
+	if err != nil {
+		return false, err
+	}
+
+	if jsonVerification.HasDuplicatedKey(header) {
+		return false, errors.New("Header Paramter name must not duplicated")
+	}
+
+	decodedPayload, err := RawURLEncoding.DecodeString(JWTPayload)
+	if err != nil {
+		return false, err
+	}
+
+	decodedJWTSignature, err := RawURLEncoding.DecodeString(JWSSignature)
+	if err != nil {
+		return false, err
+	}
+
+	var joseHeader JOSEHeader
+	if err := json.Unmarshal(decodedJWTProtectedHeader, &joseHeader); err != nil {
+		return false, err
+	}
+
+	var claimsSet ClaimsSet
+	if err := json.Unmarshal(decodedPayload, &claimsSet); err != nil {
+		return false, err
+	}
+
+	expectedJWT, err := MacComputation(joseHeader, claimsSet, secret)
+	if err != nil {
+		return false, err
+	}
+
+	decodedExpectedJWTSignature, err := RawURLEncoding.DecodeString(strings.Split(expectedJWT, ".")[2])
+
+	if !hmac.Equal(decodedJWTSignature, decodedExpectedJWTSignature) {
+		return false, errors.New("Invalid signature")
+	}
+
+	return true, nil
 }
